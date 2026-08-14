@@ -17,7 +17,7 @@ class ApiClient {
   private refreshTokenPromise: Promise<string> | null = null;
 
   constructor() {
-    const backendUrl = import.meta.env.VITE_API_URL || '/api';
+    const backendUrl = import.meta.env.VITE_API_URL || 'https://sdics.tech/api';
     
     this.client = axios.create({
       baseURL: backendUrl,

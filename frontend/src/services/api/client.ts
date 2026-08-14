@@ -25,8 +25,8 @@ class ApiClient {
   private refreshTokenPromise: Promise<string> | null = null;
 
   constructor() {
-    // Use relative URL to leverage Vite proxy (avoids CORS issues)
-    const backendUrl = import.meta.env.VITE_API_URL || '/api';
+    // Use production domain or fallback to relative URL
+    const backendUrl = import.meta.env.VITE_API_URL || 'https://sdics.tech/api';
     
     this.client = axios.create({
       baseURL: backendUrl,

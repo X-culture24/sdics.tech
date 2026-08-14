@@ -16,8 +16,8 @@ SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'dev-secret-key-change-in-production
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
 
 _DEFAULT_ALLOWED_HOSTS = [
-    'localhost', '127.0.0.1', '0.0.0.0', 'testserver',
-    'localhost:5173', 'localhost:5175',
+    'sdics.tech', 'www.sdics.tech', '206.81.28.246',
+    'localhost', '127.0.0.1',
 ]
 if DEBUG:
     _DEFAULT_ALLOWED_HOSTS += ['*']
@@ -155,14 +155,10 @@ SIMPLE_JWT = {
 # CORS Configuration - use explicit origins with credentials support
 # (Wildcard '*' with credentials is rejected by browsers when credentials true)
 _DEFAULT_CORS_ORIGINS = [
+    'https://sdics.tech',
+    'https://www.sdics.tech',
     'http://localhost:3000',
     'http://127.0.0.1:3000',
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    'http://localhost:5175',
-    'http://127.0.0.1:5175',
-    'http://0.0.0.0:5173',
-    'http://0.0.0.0:5175',
 ]
 CORS_ALLOWED_ORIGINS = os.getenv(
     'CORS_ALLOWED_ORIGINS',
