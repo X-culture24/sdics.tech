@@ -1,0 +1,295 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+      - production
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DO_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.DO_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Clear server and deploy
+        run: |
+          ssh -i ~/.ssh/id_rsa root@${{ secrets.DO_HOST }} << 'EOF'
+          
+          # Stop running services
+          echo "Stopping services..."
+          cd /app || true
+          docker-compose down 2>/dev/null || true
+          
+          # Clear old files
+          echo "Clearing old deployment..."
+          rm -rf /app/*
+          rm -rf /app/.git
+          
+          # Create app directory
+          mkdir -p /app
+          
+          # Exit deployment user script
+          EOF
+
+      - name: Deploy new code
+        run: |
+          ssh -i ~/.ssh/id_rsa root@${{ secrets.DO_HOST }} << 'EOF'
+          
+          cd /app
+          
+          # Clone fresh repository
+          echo "Cloning repository..."
+          git clone --depth 1 https://github.com/${{ github.repository }}.git .
+          
+          # Copy environment file
+          echo "Setting up environment..."
+          cat > .env << 'ENVEOF'
+          DEBUG=False
+          DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
+          ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}
+          
+          DB_ENGINE=django.db.backends.postgresql
+          DB_NAME=sdics_db
+          DB_USER=${{ secrets.DO_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          DB_HOST=localhost
+          DB_PORT=5432
+          DB_CONN_MAX_AGE=600
+          USE_CONNECTION_POOL=False
+          
+          REDIS_HOST=localhost
+          REDIS_PORT=6379
+          CELERY_BROKER_URL=redis://localhost:6379/0
+          CELERY_RESULT_BACKEND=redis://localhost:6379/0
+          
+          CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }}
+          
+          DATASETS_DIR=datasets
+          IMPORT_BATCH_SIZE=5000
+          
+          SMS_PROVIDER=twilio
+          TWILIO_ACCOUNT_SID=${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN=${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM_NUMBER=${{ secrets.TWILIO_FROM_NUMBER }}
+          
+          EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
+          EMAIL_HOST=${{ secrets.EMAIL_HOST }}
+          EMAIL_PORT=${{ secrets.EMAIL_PORT }}
+          EMAIL_USE_TLS=True
+          EMAIL_HOST_USER=${{ secrets.EMAIL_HOST_USER }}
+          EMAIL_HOST_PASSWORD=${{ secrets.EMAIL_HOST_PASSWORD }}
+          
+          JWT_ALGORITHM=HS256
+          JWT_SECRET=${{ secrets.JWT_SECRET }}
+          REFRESH_SECRET=${{ secrets.REFRESH_SECRET }}
+          TOKEN_EXPIRY=3600
+          REFRESH_EXPIRY=604800
+          ENVEOF
+          
+          # Create docker-compose.yml
+          echo "Creating docker-compose configuration..."
+          cat > docker-compose.yml << 'DCEOF'
+          version: '3.8'
+          
+          services:
+            postgres:
+              image: postgres:15-alpine
+              container_name: sdics_db
+              environment:
+                POSTGRES_DB: sdics_db
+                POSTGRES_USER: ${{ secrets.DO_USER }}
+                POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}
+              volumes:
+                - postgres_data:/var/lib/postgresql/data
+              ports:
+                - "5432:5432"
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U ${{ secrets.DO_USER }}"]
+                interval: 10s
+                timeout: 5s
+                retries: 5
+              restart: unless-stopped
+          
+            redis:
+              image: redis:7-alpine
+              container_name: sdics_redis
+              ports:
+                - "6379:6379"
+              healthcheck:
+                test: ["CMD", "redis-cli", "ping"]
+                interval: 10s
+                timeout: 5s
+                retries: 5
+              restart: unless-stopped
+          
+            backend:
+              build:
+                context: .
+                dockerfile: Dockerfile
+              container_name: sdics_backend
+              command: >
+                sh -c "python manage.py migrate &&
+                       python manage.py collectstatic --noinput &&
+                       gunicorn sdics.wsgi:application --bind 0.0.0.0:8000 --workers 4"
+              environment:
+                DEBUG: "False"
+              volumes:
+                - .:/app
+                - static_volume:/app/staticfiles
+              ports:
+                - "8000:8000"
+              depends_on:
+                postgres:
+                  condition: service_healthy
+                redis:
+                  condition: service_healthy
+              restart: unless-stopped
+          
+            frontend:
+              build:
+                context: ./frontend
+                dockerfile: Dockerfile
+              container_name: sdics_frontend
+              ports:
+                - "3000:80"
+              depends_on:
+                - backend
+              restart: unless-stopped
+          
+          volumes:
+            postgres_data:
+            static_volume:
+          DCEOF
+          
+          # Create Dockerfile for backend
+          echo "Creating backend Dockerfile..."
+          cat > Dockerfile << 'DFEOF'
+          FROM python:3.11-slim
+          
+          WORKDIR /app
+          
+          ENV PYTHONUNBUFFERED=1
+          ENV PYTHONDONTWRITEBYTECODE=1
+          
+          RUN apt-get update && apt-get install -y \
+              postgresql-client \
+              && rm -rf /var/lib/apt/lists/*
+          
+          COPY requirements.txt .
+          RUN pip install --no-cache-dir -r requirements.txt
+          
+          COPY . .
+          
+          EXPOSE 8000
+          DFEOF
+          
+          # Create frontend Dockerfile
+          echo "Creating frontend Dockerfile..."
+          mkdir -p frontend/docker
+          cat > frontend/Dockerfile << 'FDFEOF'
+          FROM node:18-alpine as builder
+          WORKDIR /app
+          COPY package*.json ./
+          RUN npm ci
+          COPY . .
+          RUN npm run build
+          
+          FROM nginx:alpine
+          COPY --from=builder /app/dist /usr/share/nginx/html
+          COPY nginx.conf /etc/nginx/conf.d/default.conf
+          EXPOSE 80
+          CMD ["nginx", "-g", "daemon off;"]
+          FDFEOF
+          
+          # Create nginx config for frontend
+          echo "Creating nginx configuration..."
+          cat > frontend/nginx.conf << 'NGEOF'
+          server {
+              listen 80;
+              server_name _;
+          
+              location / {
+                  root /usr/share/nginx/html;
+                  try_files \$uri \$uri/ /index.html;
+              }
+          
+              location /api {
+                  proxy_pass http://backend:8000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade \$http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host \$host;
+                  proxy_cache_bypass \$http_upgrade;
+              }
+          }
+          NGEOF
+          
+          echo "Setup complete!"
+          
+          EOF
+
+      - name: Build and start services
+        run: |
+          ssh -i ~/.ssh/id_rsa root@${{ secrets.DO_HOST }} << 'EOF'
+          
+          cd /app
+          
+          echo "Building Docker images..."
+          docker-compose build --no-cache
+          
+          echo "Starting services..."
+          docker-compose up -d
+          
+          echo "Waiting for services to be ready..."
+          sleep 10
+          
+          echo "Running migrations..."
+          docker-compose exec -T backend python manage.py migrate
+          
+          echo "Creating superuser..."
+          docker-compose exec -T backend python manage.py create_admin 2>/dev/null || echo "Admin user may already exist"
+          
+          echo "Importing datasets..."
+          docker-compose exec -T backend python manage.py import_citizens 2>/dev/null || echo "Datasets already imported"
+          
+          echo "Deployment complete!"
+          docker-compose ps
+          
+          EOF
+
+      - name: Health check
+        run: |
+          ssh -i ~/.ssh/id_rsa root@${{ secrets.DO_HOST }} << 'EOF'
+          
+          echo "Checking backend health..."
+          curl -f http://localhost:8000/api/auth/login/ -X OPTIONS || exit 1
+          
+          echo "Checking frontend health..."
+          curl -f http://localhost:3000/ || exit 1
+          
+          echo "All services healthy!"
+          
+          EOF
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -rf ~/.ssh/id_rsa
+
+      - name: Notify deployment
+        if: success()
+        run: echo "✅ Deployment successful to ${{ secrets.DO_HOST }}"
+
+      - name: Notify failure
+        if: failure()
+        run: echo "❌ Deployment failed"
