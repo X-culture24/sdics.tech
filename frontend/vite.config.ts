@@ -35,13 +35,23 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    minify: 'terser',
+    terserOptions: {
+      compress: {
+        drop_console: true,
+      },
+    },
+    chunkSizeWarningLimit: 1000,
     rollupOptions: {
       output: {
-        manualChunks: {
-          vendor: ['react', 'react-dom', 'react-router-dom'],
-          mui: ['@mui/material', '@mui/icons-material'],
-          query: ['@tanstack/react-query'],
-          charts: ['recharts'],
+        manualChunks: (id) => {
+          if (id.includes('node_modules/@mui/material')) return 'mui-material';
+          if (id.includes('node_modules/@mui/icons-material')) return 'mui-icons';
+          if (id.includes('node_modules/recharts')) return 'recharts';
+          if (id.includes('node_modules/@tanstack/react-query')) return 'query';
+          if (id.includes('node_modules/leaflet')) return 'leaflet';
+          if (id.includes('node_modules/react-leaflet')) return 'react-leaflet';
+          if (id.includes('node_modules')) return 'vendor';
         },
       },
     },
