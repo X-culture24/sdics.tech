@@ -12,12 +12,44 @@ env:
   DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'root' }}
 
 jobs:
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+      
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+      
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 1
+
   deploy:
     runs-on: ubuntu-latest
+    needs: build-frontend
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Download frontend dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
 
       - name: Setup SSH and validate private key format
         run: |
@@ -220,24 +252,23 @@ jobs:
             echo 'python manage.py collectstatic --noinput'
             echo 'printf "Step 7/14: create_admin (idempotent)\n"'
             echo 'python manage.py create_admin 2>/dev/null || printf "  (admin already exists or command skipped)\n"'
-            echo 'printf "Step 8/14: npm ci + build main frontend (dashboard)\n"'
-            echo 'cd frontend'
-            echo 'npm ci --silent'
-            echo 'npm run build --silent'
-            echo 'rm -rf $FRONTEND_DIST/*'
-            echo 'cp -a dist/. $FRONTEND_DIST/'
-            echo 'cd ..'
-            echo 'printf "Step 9/14: npm install --legacy-peer-deps + build officer mobile\n"'
-            echo 'cd frontend-mobile'
-            echo 'npm install --legacy-peer-deps'
-            echo 'npm run build || { printf "ERROR: Mobile build failed\n"; exit 1; }'
-            echo 'if [ ! -d "dist" ]; then'
-            echo '  printf "ERROR: dist/ directory not created. Mobile build failed.\n"'
+            echo 'printf "Step 8/14: Frontend already pre-built on GitHub Actions (skip npm build)\n"'
+            echo 'printf "  Waiting for frontend dist from build job...\n"'
+            echo 'if [ ! -d "frontend/dist" ]; then'
+            echo '  printf "  ERROR: frontend/dist not found. Check build job completed.\n"'
             echo '  exit 1'
             echo 'fi'
-            echo 'rm -rf $MOBILE_DIST/*'
-            echo 'cp -a dist/. $MOBILE_DIST/'
-            echo 'cd ..'
+            echo 'rm -rf $FRONTEND_DIST/*'
+            echo 'cp -a frontend/dist/. $FRONTEND_DIST/'
+            echo 'printf "  Frontend deployed to %s\n" "$FRONTEND_DIST"'
+            echo 'printf "Step 9/14: Mobile frontend - skip npm build on server\n"'
+            echo 'if [ -d "frontend-mobile/dist" ]; then'
+            echo '  rm -rf $MOBILE_DIST/*'
+            echo '  cp -a frontend-mobile/dist/. $MOBILE_DIST/'
+            echo '  printf "  Mobile deployed from pre-built dist\n"'
+            echo 'else'
+            echo '  printf "  Skipping mobile - not pre-built (optional)\n"'
+            echo 'fi'
             echo 'printf "Step 10/14: Install nginx vhost (substitute __APP_DIR__ for %s)\n" "$APP_DIR"'
             echo 'sed "s|__APP_DIR__|$APP_DIR|g" nginx.conf > /tmp/sdics-nginx.conf'
             echo '(sudo cp -f /tmp/sdics-nginx.conf /etc/nginx/sites-available/sdics.tech.conf) 2>/dev/null || cp -f /tmp/sdics-nginx.conf /etc/nginx/sites-available/sdics.tech.conf'
