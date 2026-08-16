@@ -24,7 +24,6 @@
     "react-leaflet": "^5.0.0",
     "react-router-dom": "^6.20.0",
     "recharts": "^2.10.0",
-    "workbox-cli": "^7.0.0",
     "workbox-google-analytics": "^7.0.0",
     "workbox-precaching": "^7.0.0",
     "workbox-routing": "^7.0.0",
