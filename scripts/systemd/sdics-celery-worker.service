@@ -1,0 +1,25 @@
+[Unit]
+Description=SDICS Celery Worker
+After=network.target postgresql.service redis.service sdics-gunicorn.service
+
+[Service]
+Type=forking
+User=$USER
+Group=$USER
+WorkingDirectory=$APP_DIR
+Environment="PATH=$VENV_DIR/bin"
+EnvironmentFile=$APP_DIR/.env
+ExecStart=$VENV_DIR/bin/celery -A sdics worker \
+    --loglevel=info \
+    --concurrency=2 \
+    --queues=celery \
+    --logfile=$APP_DIR/logs/celery-worker.log \
+    --detach
+ExecStop=$VENV_DIR/bin/celery -A sdics control shutdown
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

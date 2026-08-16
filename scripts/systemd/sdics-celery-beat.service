@@ -1,0 +1,22 @@
+[Unit]
+Description=SDICS Celery Beat Scheduler
+After=network.target postgresql.service redis.service sdics-gunicorn.service
+
+[Service]
+Type=simple
+User=$USER
+Group=$USER
+WorkingDirectory=$APP_DIR
+Environment="PATH=$VENV_DIR/bin"
+EnvironmentFile=$APP_DIR/.env
+ExecStart=$VENV_DIR/bin/celery -A sdics beat \
+    --loglevel=info \
+    --logfile=$APP_DIR/logs/celery-beat.log \
+    --schedule=$APP_DIR/celerybeat-schedule
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

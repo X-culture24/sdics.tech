@@ -1,0 +1,24 @@
+[Unit]
+Description=SDICS Django Daphne ASGI (WebSocket) Server
+After=network.target postgresql.service redis.service sdics-gunicorn.service
+
+[Service]
+Type=simple
+User=$USER
+Group=$USER
+WorkingDirectory=$APP_DIR
+Environment="PATH=$VENV_DIR/bin"
+EnvironmentFile=$APP_DIR/.env
+ExecStart=$VENV_DIR/bin/daphne sdics.asgi:application \
+    --bind 127.0.0.1 \
+    --port 8001 \
+    --access-log $APP_DIR/logs/daphne-access.log \
+    --ping-interval 20 \
+    --ping-timeout 40
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,29 @@
+[Unit]
+Description=SDICS Django Gunicorn Backend
+After=network.target postgresql.service redis.service
+
+[Service]
+Type=notify
+User=$USER
+Group=$USER
+WorkingDirectory=$APP_DIR
+Environment="PATH=$VENV_DIR/bin"
+EnvironmentFile=$APP_DIR/.env
+ExecStart=$VENV_DIR/bin/gunicorn sdics.wsgi:application \
+    --bind 127.0.0.1:8000 \
+    --workers 4 \
+    --threads 2 \
+    --timeout 120 \
+    --max-requests 1000 \
+    --max-requests-jitter 50 \
+    --access-logfile $APP_DIR/logs/gunicorn-access.log \
+    --error-logfile $APP_DIR/logs/gunicorn-error.log \
+    --log-level info
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
