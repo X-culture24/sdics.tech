@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || '206.81.28.246' }}
-  DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'root' }}
+  DEPLOY_HOST: 206.81.28.246
+  DEPLOY_USER: root
 
 jobs:
   build-frontend:
@@ -106,14 +106,12 @@ jobs:
             exit 1
           fi
           echo "OK: SSH key BEGIN / END markers present"
-          echo "DEBUG: DEPLOY_HOST env var value: '${{ env.DEPLOY_HOST }}'"
-          DEPLOY_HOST_VAR="${{ env.DEPLOY_HOST }}"
-          echo "DEBUG: DEPLOY_HOST_VAR = '$DEPLOY_HOST_VAR'"
-          if [ -z "$DEPLOY_HOST_VAR" ]; then
-            echo "ERROR: DEPLOY_HOST is empty! Check GitHub secrets."
+          DEPLOY_HOST_VAL="${{ env.DEPLOY_HOST }}"
+          if [ -z "$DEPLOY_HOST_VAL" ]; then
+            echo "ERROR: DEPLOY_HOST is empty!"
             exit 1
           fi
-          (ssh-keyscan -t rsa,ecdsa,ed25519 -H "$DEPLOY_HOST_VAR" 2>/dev/null || true) >> ~/.ssh/known_hosts
+          (ssh-keyscan -t rsa,ecdsa,ed25519 "$DEPLOY_HOST_VAL" 2>/dev/null || true) >> ~/.ssh/known_hosts
           printf '%s\n' \
             'Host *' \
             '    IdentitiesOnly yes' \
