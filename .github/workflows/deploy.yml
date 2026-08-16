@@ -106,7 +106,14 @@ jobs:
             exit 1
           fi
           echo "OK: SSH key BEGIN / END markers present"
-          (ssh-keyscan -t rsa,ecdsa,ed25519 -H ${{ env.DEPLOY_HOST }} 2>/dev/null || true) >> ~/.ssh/known_hosts
+          echo "DEBUG: DEPLOY_HOST env var value: '${{ env.DEPLOY_HOST }}'"
+          DEPLOY_HOST_VAR="${{ env.DEPLOY_HOST }}"
+          echo "DEBUG: DEPLOY_HOST_VAR = '$DEPLOY_HOST_VAR'"
+          if [ -z "$DEPLOY_HOST_VAR" ]; then
+            echo "ERROR: DEPLOY_HOST is empty! Check GitHub secrets."
+            exit 1
+          fi
+          (ssh-keyscan -t rsa,ecdsa,ed25519 -H "$DEPLOY_HOST_VAR" 2>/dev/null || true) >> ~/.ssh/known_hosts
           printf '%s\n' \
             'Host *' \
             '    IdentitiesOnly yes' \
