@@ -19,159 +19,285 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup SSH
+      - name: Setup SSH and validate private key format
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
-
-      - name: Deploy to server
-        run: |
-          ssh -i ~/.ssh/id_rsa ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }} << 'REMOTESERVER'
-
           set -e
-
-          DEPLOY_USER_LOCAL=${{ env.DEPLOY_USER }}
-          if [ "$DEPLOY_USER_LOCAL" = "root" ]; then
-            APP_DIR=/root/sdics.tech
-          else
-            APP_DIR=/home/$DEPLOY_USER_LOCAL/sdics.tech
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          KEY_FILE=~/.ssh/id_rsa
+          printf '%s\n' '${{ secrets.SERVER_SSH_KEY }}' > $KEY_FILE
+          chmod 600 $KEY_FILE
+          echo "=== SSH key diagnostics (secret content hidden)==="
+          echo "Key file mode : $(stat -c '%a %U %n' $KEY_FILE)"
+          echo "Key file size: $(wc -c < $KEY_FILE) bytes, $(wc -l < $KEY_FILE) lines"
+          FP=$(ssh-keygen -l -f $KEY_FILE 2>&1) || FP="(ssh-keygen could NOT parse — malformed, see BEGIN/END markers)"
+          echo "Fingerprint   : $FP"
+          echo "First line   : $(head -1 $KEY_FILE)"
+          echo "Last line    : $(tail -1 $KEY_FILE)"
+          echo "---"
+          if ! head -1 $KEY_FILE | grep -qE '^-----BEGIN( RSA| OPENSSH)? PRIVATE KEY-----'; then
+            echo "X X X X X X X X X X X X X X X X X X X X X X X X X X X"
+            echo "  INVALID SSH KEY FORMAT"
+            echo "  Your SERVER_SSH_KEY secret starts with:"
+            echo "    $(head -1 $KEY_FILE)"
+            echo ""
+            echo "  It MUST start with exactly one of:"
+            echo "    -----BEGIN OPENSSH PRIVATE KEY-----   (newer ssh-keygen -t ed25519)"
+            echo "    -----BEGIN RSA PRIVATE KEY-----       (older PEM RSA)"
+            echo ""
+            echo "  MOST COMMON MISTAKE:"
+            echo "  You pasted the PUBLIC key (~/.ssh/id_rsa.pub) which starts with"
+            echo "  'ssh-ed25519 AAAA...' or 'ssh-rsa AAAA...' into the GitHub secret."
+            echo "  The public key belongs on the SERVER in /root/.ssh/authorized_keys —"
+            echo "  NOT in GitHub Actions secrets. GitHub needs the PRIVATE key file."
+            echo ""
+            echo "  FIX (local machine):"
+            echo "    cat ~/.ssh/id_rsa       (the file WITHOUT the .pub suffix)"
+            echo "  Copy every line including the -----BEGIN and -----END lines,"
+            echo "  then re-save GitHub secret:"
+            echo "    Repo > Settings > Secrets and variables > Actions > SERVER_SSH_KEY > Update"
+            echo "X X X X X X X X X X X X X X X X X X X X X X X X X X X"
+            exit 1
           fi
-          VENV_DIR=$APP_DIR/venv
-          FRONTEND_DIST=/var/www/sdics/frontend
-          MOBILE_DIST=/var/www/sdics/mobile
-
-          echo "=== Using APP_DIR: $APP_DIR ==="
-
-          echo "=== Step 1: Prepare directories ==="
-          mkdir -p $APP_DIR
-          sudo mkdir -p $FRONTEND_DIST $MOBILE_DIST
-          sudo chown -R $USER:$USER $FRONTEND_DIST $MOBILE_DIST 2>/dev/null || chown -R $USER:$USER $FRONTEND_DIST $MOBILE_DIST
-
-          cd $APP_DIR || cd / && mkdir -p $APP_DIR && cd $APP_DIR
-
-          echo "=== Step 2: Pull latest code ==="
-          if [ -d ".git" ]; then
-            echo "Repository exists, pulling latest changes..."
-            git fetch origin
-            git reset --hard HEAD
-            git clean -fd
-            BRANCH=${GITHUB_REF_NAME:-main}
-            if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
-              git checkout $BRANCH
-              git pull origin $BRANCH
-            else
-              git checkout main
-              git pull origin main
-            fi
-          else
-            echo "Cloning fresh repository..."
-            rm -rf $APP_DIR/* $APP_DIR/.git 2>/dev/null || true
-            git clone --depth 1 https://github.com/${{ github.repository }}.git .
-            BRANCH=${GITHUB_REF_NAME:-main}
-            git checkout $BRANCH 2>/dev/null || git checkout main
+          if ! tail -1 $KEY_FILE | grep -qE '^-----END( RSA| OPENSSH)? PRIVATE KEY-----'; then
+            echo "X X X X X X X X X X X X X X X X X X X X X X X X X X X"
+            echo "  INVALID SSH KEY FORMAT (missing or malformed -----END line)"
+            echo "  Last line in secret was: $(tail -1 $KEY_FILE)"
+            echo ""
+            echo "  CAUSE: GitHub secret textarea stripped the trailing newline + -----END"
+            echo "  line when you pasted the key."
+            echo ""
+            echo "  FIX:"
+            echo "    cat -A ~/.ssh/id_rsa   (terminal — shows $ for newlines)"
+            echo "  Copy every single line INCLUDING the final blank newline and overwrite SERVER_SSH_KEY secret."
+            echo "X X X X X X X X X X X X X X X X X X X X X X X X X X X"
+            exit 1
           fi
+          echo "OK: SSH key BEGIN / END markers present"
+          (ssh-keyscan -t rsa,ecdsa,ed25519 -H ${{ env.DEPLOY_HOST }} 2>/dev/null || true) >> ~/.ssh/known_hosts
+          printf '%s\n' \
+            'Host *' \
+            '    IdentitiesOnly yes' \
+            '    IdentityFile ~/.ssh/id_rsa' \
+            '    PreferredAuthentications publickey' \
+            '    StrictHostKeyChecking no' \
+            '    UserKnownHostsFile /dev/null' \
+            '    ServerAliveInterval 60' \
+            '    ServerAliveCountMax 3' \
+            > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          chmod 644 ~/.ssh/known_hosts 2>/dev/null || true
+          echo "OK: SSH setup complete"
 
-          echo "=== Step 3: Configure environment ==="
-          cat > .env << 'ENVEOF'
-          ${{ secrets.ENV_FILE }}
-          ENVEOF
-
-          echo "=== Step 4: Setup Python virtual environment ==="
-          if [ ! -d "$VENV_DIR" ]; then
-            python3 -m venv $VENV_DIR
-          fi
-          source $VENV_DIR/bin/activate
-          pip install --upgrade pip
-          pip install -r requirements.txt
-
-          echo "=== Step 5: Run Django migrations ==="
-          python manage.py migrate --noinput
-
-          echo "=== Step 6: Collect static files ==="
-          mkdir -p staticfiles media logs
-          python manage.py collectstatic --noinput
-
-          echo "=== Step 7: Create admin user if needed ==="
-          python manage.py create_admin 2>/dev/null || echo "Admin user already exists or command skipped"
-
-          echo "=== Step 8: Build frontend (main dashboard) ==="
-          cd frontend
-          npm ci
-          npm run build
-          rm -rf $FRONTEND_DIST/*
-          cp -a dist/. $FRONTEND_DIST/
-          cd ..
-
-          echo "=== Step 9: Build officer mobile frontend ==="
-          cd frontend-mobile
-          npm ci --legacy-peer-deps
-          npm run build
-          rm -rf $MOBILE_DIST/*
-          cp -a dist/. $MOBILE_DIST/
-          cd ..
-
-          echo "=== Step 10: Copy nginx config ==="
-          sed "s|__APP_DIR__|$APP_DIR|g" nginx.conf > /tmp/sdics-nginx.conf
-          sudo cp -f /tmp/sdics-nginx.conf /etc/nginx/sites-available/sdics.tech.conf 2>/dev/null || cp -f /tmp/sdics-nginx.conf /etc/nginx/sites-available/sdics.tech.conf
-          sudo ln -sf /etc/nginx/sites-available/sdics.tech.conf /etc/nginx/sites-enabled/sdics.tech.conf 2>/dev/null || ln -sf /etc/nginx/sites-available/sdics.tech.conf /etc/nginx/sites-enabled/sdics.tech.conf
-          sudo rm -f /etc/nginx/sites-enabled/default 2>/dev/null || rm -f /etc/nginx/sites-enabled/default
-          rm -f /tmp/sdics-nginx.conf
-
-          echo "=== Step 11: Test nginx config ==="
-          sudo nginx -t 2>/dev/null || nginx -t
-
-          echo "=== Step 12: Setup systemd services ==="
-          export USER=$DEPLOY_USER_LOCAL APP_DIR VENV_DIR
-          TMP_SERVICE=/tmp/sdics-services.tmp
-          for svc in sdics-gunicorn sdics-daphne sdics-celery-worker sdics-celery-beat; do
-            envsubst '$USER $APP_DIR $VENV_DIR' < $APP_DIR/scripts/systemd/$svc.service > $TMP_SERVICE
-            sudo cp $TMP_SERVICE /etc/systemd/system/$svc.service 2>/dev/null || cp $TMP_SERVICE /etc/systemd/system/$svc.service
-          done
-          rm -f $TMP_SERVICE
-
-          echo "=== Step 13: Reload systemd and restart services ==="
-          sudo systemctl daemon-reload 2>/dev/null || systemctl daemon-reload
-          sudo systemctl enable sdics-gunicorn sdics-daphne sdics-celery-worker sdics-celery-beat 2>/dev/null || systemctl enable sdics-gunicorn sdics-daphne sdics-celery-worker sdics-celery-beat 2>/dev/null || true
-          sudo systemctl restart sdics-gunicorn 2>/dev/null || systemctl restart sdics-gunicorn 2>/dev/null || true
-          sudo systemctl restart sdics-daphne 2>/dev/null || systemctl restart sdics-daphne 2>/dev/null || true
-          sudo systemctl restart sdics-celery-worker 2>/dev/null || systemctl restart sdics-celery-worker 2>/dev/null || true
-          sudo systemctl restart sdics-celery-beat 2>/dev/null || systemctl restart sdics-celery-beat 2>/dev/null || true
-          sudo systemctl restart nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
-
-          echo "=== Step 14: Ensure PostgreSQL & Redis are running ==="
-          (sudo systemctl enable postgresql redis-server 2>/dev/null && sudo systemctl start postgresql redis-server 2>/dev/null) || \
-          (sudo systemctl enable postgresql redis 2>/dev/null && sudo systemctl start postgresql redis 2>/dev/null) || \
-          (systemctl enable postgresql redis-server 2>/dev/null && systemctl start postgresql redis-server 2>/dev/null) || \
-          true
-
-          echo "=== Waiting for services to start... ==="
-          sleep 8
-
-          echo "=== Service status ==="
-          (sudo systemctl --no-pager is-active sdics-gunicorn 2>/dev/null || systemctl --no-pager is-active sdics-gunicorn 2>/dev/null) && echo "  sdics-gunicorn: active" || echo "  sdics-gunicorn: INACTIVE (check journalctl -u sdics-gunicorn)"
-          (sudo systemctl --no-pager is-active sdics-daphne 2>/dev/null || systemctl --no-pager is-active sdics-daphne 2>/dev/null) && echo "  sdics-daphne: active" || echo "  sdics-daphne: INACTIVE (optional - for WebSockets only)"
-          (sudo systemctl --no-pager is-active nginx 2>/dev/null || systemctl --no-pager is-active nginx 2>/dev/null) && echo "  nginx: active" || echo "  nginx: INACTIVE"
-
-          echo "=== Health checks ==="
-          curl -sf http://127.0.0.1/health 2>/dev/null && echo "  ✅ Nginx health OK" || echo "  ⚠️  Nginx health check"
-          (sudo -u postgres pg_isready 2>/dev/null || su postgres -c pg_isready 2>/dev/null) && echo "  ✅ PostgreSQL running" || echo "  ⚠️  PostgreSQL status"
-          redis-cli ping 2>/dev/null | grep -q PONG && echo "  ✅ Redis running" || echo "  ⚠️  Redis status"
-
+      - name: Test SSH connection with verbose debug
+        run: |
+          echo "=== ssh -vvv ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }} (timeout 15s) ==="
           echo ""
-          echo "✅ Deployment complete!"
+          set +e
+          ssh -vvv -o BatchMode=yes -o ConnectTimeout=15 \
+              ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }} \
+              'echo "SSH-OK user=$(id) host=$(hostname) up=$(uptime -p)"'
+          rc=$?
+          set -e
+          echo ""
+          echo "ssh exit code = $rc"
+          if [ $rc -ne 0 ]; then
+            echo ""
+            echo "======================================================"
+            echo "  SSH FAILURE — diagnose with the -vvv verbose log above:"
+            echo "======================================================"
+            echo ""
+            echo "  Scroll up through the ssh -vvv output. Look for:"
+            echo "    debug1: Offering public key: ~/.ssh/id_rsa ..."
+            echo "  followed immediately after that line, look for either:"
+            echo "    'Server accepts key'  -> key GOOD, server-side permissions issue"
+            echo "    'No more authentication methods to try' -> server REJECTED the key"
+            echo ""
+            echo "======================================================"
+            echo "  4 FIXES FOR 'Permission denied (publickey)' (code=255)"
+            echo "======================================================"
+            echo ""
+            echo "  [1] Wrong file pasted in SERVER_SSH_KEY secret"
+            echo "      SERVER_SSH_KEY must contain PRIVATE key ~/.ssh/id_rsa (no .pub)."
+            echo "      Secret must start with -----BEGIN PRIVATE KEY-----."
+            echo "      The PUBLIC key id_rsa.pub goes ON THE SERVER in"
+            echo "      /root/.ssh/authorized_keys"
+            echo ""
+            echo "  [2] Matching PUBLIC KEY missing on server 206.81.28.246"
+            echo "      Console / password login to server and run:"
+            echo "        sudo mkdir -p /root/.ssh && sudo chmod 700 /root/.ssh"
+            echo "        echo 'ssh-ed25519 AAAAYOURPUBKEYHERE comment' | sudo tee -a /root/.ssh/authorized_keys"
+            echo "        sudo chmod 600 /root/.ssh/authorized_keys && sudo chown -R root:root /root/.ssh"
+            echo "      For non-root DEPLOY_USER use ~deployuser/.ssh/authorized_keys instead."
+            echo ""
+            echo "  [3] Key encrypted (passphrase protected)"
+            echo "      CI cannot enter passphrases. Generate a NO-PASSPHRASE deploy-only key:"
+            echo "        ssh-keygen -t ed25519 -N '' -C 'gha-deploy-sdics' -f ~/.ssh/sdics_gha_deploy"
+            echo "      Paste sdics_gha_deploy into GitHub SERVER_SSH_KEY."
+            echo "      Append sdics_gha_deploy.pub onto server /root/.ssh/authorized_keys."
+            echo ""
+            echo "  [4] Server /root/.ssh file modes wrong"
+            echo "      On server run:"
+            echo "        sudo chmod 700 /root/.ssh ; sudo chmod 600 /root/.ssh/authorized_keys"
+            echo "        sudo restorecon -Rv /root/.ssh 2>/dev/null || true   (SELinux only)"
+            echo "      Server log for the EXACT reason the key was rejected:"
+            echo "        sudo tail -n 40 /var/log/auth.log        (Debian / Ubuntu)"
+            echo "        sudo journalctl -u sshd -n 40 --no-pager (systemd)"
+            echo ""
+            exit 1
+          fi
+          echo ""
+          echo "PASS: SSH connection established"
 
-          REMOTESERVER
+      - name: Prepare deploy script, ENV base64, scp, and execute remotely
+        run: |
+          set -e
+          DEPLOY_USER_LOCAL=${{ env.DEPLOY_USER }}
+          DEPLOY_HOST_LOCAL=${{ env.DEPLOY_HOST }}
+          GITHUB_REPO=${{ github.repository }}
+          GITHUB_BRANCH=${GITHUB_REF_NAME:-main}
+          echo "Deploying $GITHUB_REPO branch=$GITHUB_BRANCH to $DEPLOY_USER_LOCAL@$DEPLOY_HOST_LOCAL"
+          ENV_B64=$(printf '%s\n' '${{ secrets.ENV_FILE }}' | base64 -w0)
+          if [ -z "$ENV_B64" ]; then
+            echo "ERROR: ENV_FILE secret is EMPTY. Please set the ENV_FILE GitHub Actions secret to the full .env contents."
+            exit 1
+          fi
+          echo "ENV_FILE size (base64): ${#ENV_B64} chars"
+          (
+            echo '#!/usr/bin/env bash'
+            echo 'set -e'
+            echo 'DEPLOY_USER_LOCAL="$1"'
+            echo 'GITHUB_REPO="$2"'
+            echo 'GITHUB_BRANCH="$3"'
+            echo 'ENV_B64="$4"'
+            echo 'if [ "$DEPLOY_USER_LOCAL" = "root" ]; then'
+            echo '  APP_DIR=/root/sdics.tech'
+            echo 'else'
+            echo '  APP_DIR=/home/$DEPLOY_USER_LOCAL/sdics.tech'
+            echo 'fi'
+            echo 'VENV_DIR=$APP_DIR/venv'
+            echo 'FRONTEND_DIST=/var/www/sdics/frontend'
+            echo 'MOBILE_DIST=/var/www/sdics/mobile'
+            echo 'printf "Using APP_DIR=%s VENV=%s USER=%s\n" "$APP_DIR" "$VENV_DIR" "$DEPLOY_USER_LOCAL"'
+            echo 'printf "Step 1/14: Prepare directories\n"'
+            echo 'mkdir -p "$APP_DIR"'
+            echo '(sudo mkdir -p "$FRONTEND_DIST" "$MOBILE_DIST") 2>/dev/null || mkdir -p "$FRONTEND_DIST" "$MOBILE_DIST"'
+            echo '(sudo chown -R $USER:$USER "$FRONTEND_DIST" "$MOBILE_DIST") 2>/dev/null || chown -R $USER:$USER "$FRONTEND_DIST" "$MOBILE_DIST"'
+            echo 'cd "$APP_DIR" || (cd / && mkdir -p "$APP_DIR" && cd "$APP_DIR")'
+            echo 'printf "Step 2/14: Pull latest code via git\n"'
+            echo 'if [ -d ".git" ]; then'
+            echo '  printf "  .git present - git fetch + reset + pull\n"'
+            echo '  git fetch origin'
+            echo '  git reset --hard HEAD'
+            echo '  git clean -fd'
+            echo '  if git show-ref --verify --quiet "refs/remotes/origin/$GITHUB_BRANCH"; then'
+            echo '    git checkout "$GITHUB_BRANCH"'
+            echo '    git pull origin "$GITHUB_BRANCH"'
+            echo '  else'
+            echo '    git checkout main'
+            echo '    git pull origin main'
+            echo '  fi'
+            echo 'else'
+            echo '  printf "  .git missing - clone fresh from %s\n" "$GITHUB_REPO"'
+            echo '  rm -rf $APP_DIR/* $APP_DIR/.git 2>/dev/null || true'
+            echo '  git clone --depth 1 "https://github.com/$GITHUB_REPO.git" .'
+            echo '  git checkout "$GITHUB_BRANCH" 2>/dev/null || git checkout main'
+            echo 'fi'
+            echo 'printf "Step 3/14: Write .env (base64 decode ENV secret)\n"'
+            echo 'printf "%s" "$ENV_B64" | base64 -d > .env'
+            echo 'printf "  .env written: %s bytes\n" "$(wc -c < .env)"'
+            echo 'printf "Step 4/14: Python venv + pip install\n"'
+            echo 'if [ ! -d "$VENV_DIR" ]; then'
+            echo '  python3 -m venv "$VENV_DIR"'
+            echo 'fi'
+            echo '. "$VENV_DIR/bin/activate"'
+            echo 'pip install --upgrade pip --quiet'
+            echo 'pip install -r requirements.txt --quiet'
+            echo 'printf "Step 5/14: Django migrate\n"'
+            echo 'mkdir -p staticfiles media logs'
+            echo 'python manage.py migrate --noinput'
+            echo 'printf "Step 6/14: Django collectstatic\n"'
+            echo 'python manage.py collectstatic --noinput'
+            echo 'printf "Step 7/14: create_admin (idempotent)\n"'
+            echo 'python manage.py create_admin 2>/dev/null || printf "  (admin already exists or command skipped)\n"'
+            echo 'printf "Step 8/14: npm ci + build main frontend (dashboard)\n"'
+            echo 'cd frontend'
+            echo 'npm ci --silent'
+            echo 'npm run build --silent'
+            echo 'rm -rf $FRONTEND_DIST/*'
+            echo 'cp -a dist/. $FRONTEND_DIST/'
+            echo 'cd ..'
+            echo 'printf "Step 9/14: npm ci --legacy-peer-deps + build officer mobile\n"'
+            echo 'cd frontend-mobile'
+            echo 'npm ci --legacy-peer-deps --silent'
+            echo 'npm run build --silent'
+            echo 'rm -rf $MOBILE_DIST/*'
+            echo 'cp -a dist/. $MOBILE_DIST/'
+            echo 'cd ..'
+            echo 'printf "Step 10/14: Install nginx vhost (substitute __APP_DIR__ for %s)\n" "$APP_DIR"'
+            echo 'sed "s|__APP_DIR__|$APP_DIR|g" nginx.conf > /tmp/sdics-nginx.conf'
+            echo '(sudo cp -f /tmp/sdics-nginx.conf /etc/nginx/sites-available/sdics.tech.conf) 2>/dev/null || cp -f /tmp/sdics-nginx.conf /etc/nginx/sites-available/sdics.tech.conf'
+            echo '(sudo ln -sf /etc/nginx/sites-available/sdics.tech.conf /etc/nginx/sites-enabled/sdics.tech.conf) 2>/dev/null || ln -sf /etc/nginx/sites-available/sdics.tech.conf /etc/nginx/sites-enabled/sdics.tech.conf'
+            echo '(sudo rm -f /etc/nginx/sites-enabled/default) 2>/dev/null || rm -f /etc/nginx/sites-enabled/default'
+            echo 'rm -f /tmp/sdics-nginx.conf'
+            echo 'printf "Step 11/14: nginx -t validate config\n"'
+            echo '(sudo nginx -t) 2>/dev/null || nginx -t'
+            echo 'printf "Step 12/14: Install 4 systemd services via envsubst templates\n"'
+            echo 'export USER=$DEPLOY_USER_LOCAL APP_DIR VENV_DIR'
+            echo 'TMP_SVC=/tmp/sdics-svc.tmp'
+            echo 'for svc in sdics-gunicorn sdics-daphne sdics-celery-worker sdics-celery-beat; do'
+            echo '  envsubst "$USER $APP_DIR $VENV_DIR" < $APP_DIR/scripts/systemd/$svc.service > $TMP_SVC'
+            echo '  (sudo cp $TMP_SVC /etc/systemd/system/$svc.service) 2>/dev/null || cp $TMP_SVC /etc/systemd/system/$svc.service'
+            echo 'done'
+            echo 'rm -f $TMP_SVC'
+            echo 'printf "Step 13/14: systemctl daemon-reload, enable and restart services\n"'
+            echo '(sudo systemctl daemon-reload) 2>/dev/null || systemctl daemon-reload'
+            echo '(sudo systemctl enable sdics-gunicorn sdics-daphne sdics-celery-worker sdics-celery-beat) 2>/dev/null || systemctl enable sdics-gunicorn sdics-daphne sdics-celery-worker sdics-celery-beat 2>/dev/null || true'
+            echo '(sudo systemctl restart sdics-gunicorn) 2>/dev/null || systemctl restart sdics-gunicorn 2>/dev/null || true'
+            echo '(sudo systemctl restart sdics-daphne) 2>/dev/null || systemctl restart sdics-daphne 2>/dev/null || true'
+            echo '(sudo systemctl restart sdics-celery-worker) 2>/dev/null || systemctl restart sdics-celery-worker 2>/dev/null || true'
+            echo '(sudo systemctl restart sdics-celery-beat) 2>/dev/null || systemctl restart sdics-celery-beat 2>/dev/null || true'
+            echo '(sudo systemctl restart nginx) 2>/dev/null || systemctl restart nginx 2>/dev/null || true'
+            echo 'printf "Step 14/14: Ensure PostgreSQL + Redis enabled and started\n"'
+            echo '(sudo systemctl enable postgresql redis-server 2>/dev/null && sudo systemctl start postgresql redis-server 2>/dev/null) || (sudo systemctl enable postgresql redis 2>/dev/null && sudo systemctl start postgresql redis 2>/dev/null) || (systemctl enable postgresql redis-server 2>/dev/null && systemctl start postgresql redis-server 2>/dev/null) || true'
+            echo 'printf "Waiting 8 seconds for services to stabilize...\n"'
+            echo 'sleep 8'
+            echo 'printf "Service status:\n"'
+            echo 'for S in sdics-gunicorn sdics-daphne sdics-celery-worker sdics-celery-beat nginx postgresql; do'
+            echo '  ACT=$((sudo systemctl --no-pager is-active $S 2>/dev/null) || (systemctl --no-pager is-active $S 2>/dev/null) || echo unknown)'
+            echo '  printf "  %-28s -> %s\n" "$S" "$ACT"'
+            echo 'done'
+            echo '(redis-cli ping 2>/dev/null | grep -q PONG) && RSTAT=active || RSTAT=inactive'
+            echo 'printf "  %-28s -> %s\n" "redis" "$RSTAT"'
+            echo 'printf "Health checks:\n"'
+            echo '(curl -sf http://127.0.0.1/health >/dev/null 2>&1 && printf "  nginx /health        -> PASS\n") || printf "  nginx /health        -> SKIP\n"'
+            echo '(sudo -u postgres pg_isready 2>/dev/null && printf "  PostgreSQL pg_isready -> PASS\n") || printf "  PostgreSQL pg_isready -> SKIP\n"'
+            echo '(redis-cli ping 2>/dev/null | grep -q PONG && printf "  Redis PING          -> PASS\n") || printf "  Redis PING          -> SKIP\n"'
+            echo 'printf "\nDeployment complete\n"'
+          ) > /tmp/deploy-sdics.sh
+          chmod +x /tmp/deploy-sdics.sh
+          echo "Deploy script prepared locally: /tmp/deploy-sdics.sh ($(wc -l < /tmp/deploy-sdics.sh) lines)"
+          echo "Copying to server via scp..."
+          scp -o BatchMode=yes -o ConnectTimeout=15 /tmp/deploy-sdics.sh "$DEPLOY_USER_LOCAL@$DEPLOY_HOST_LOCAL:/tmp/deploy-sdics.sh"
+          echo "Executing remote deploy script (long-running - may take 3-10 min depending on npm/pip installs)"
+          ssh -o BatchMode=yes -o ConnectTimeout=600 \
+              "$DEPLOY_USER_LOCAL@$DEPLOY_HOST_LOCAL" \
+              "chmod +x /tmp/deploy-sdics.sh && bash /tmp/deploy-sdics.sh '$DEPLOY_USER_LOCAL' '$GITHUB_REPO' '$GITHUB_BRANCH' '$ENV_B64'"
 
-      - name: Cleanup
+      - name: Cleanup local SSH material
         if: always()
-        run: rm -rf ~/.ssh/id_rsa
+        run: |
+          rm -rf ~/.ssh/id_rsa ~/.ssh/config ~/.ssh/known_hosts
+          rm -f /tmp/deploy-sdics.sh
 
       - name: Notify success
         if: success()
-        run: echo "✅ Deployment successful to ${{ env.DEPLOY_HOST }}"
+        run: |
+          echo "Deployment successful -> ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}"
+          echo "Visit: https://${{ env.DEPLOY_HOST }}"
 
       - name: Notify failure
         if: failure()
-        run: echo "❌ Deployment failed - check logs above"
+        run: |
+          echo "Deployment FAILED"
+          echo "Review the failing STEP above and its FULL logs for the SSH connection diagnostics or remote deploy output"
